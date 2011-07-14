@@ -74,12 +74,12 @@ cdef class _Socket(_original_Socket):
         self.__writable = Event()
         callback = create_weakmethod(_Socket.__state_changed, self, _Socket)
         try:
-            self._state_event = get_hub().loop.io(self.getsockopt(FD), 1) # read state watcher
+            self._state_event = get_hub().loop.io(self.__getsockopt(FD), 1) # read state watcher
             self._state_event.start(callback)
         except AttributeError, e:
             # for gevent<1.0 compatibility
             from gevent.core import read_event
-            self._state_event = read_event(self.getsockopt(FD), callback, persist=True)
+            self._state_event = read_event(self.__getsockopt(FD), callback, persist=True)
 
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
@@ -88,11 +88,18 @@ cdef class _Socket(_original_Socket):
             self.__readable.set()
             return
 
-        cdef int events = self.getsockopt(EVENTS)
+        cdef int events = self.__getsockopt(EVENTS)
         if events & POLLOUT:
             self.__writable.set()
         if events & POLLIN:
             self.__readable.set()
+
+    cdef __notify_waiters(self):
+        """Notifies all waiters about a possible change in the socket state.
+        The waiters can try to read or write.
+        """
+        self.__writable.set()
+        self.__readable.set()
 
     cdef _wait_write(self) with gil:
         self.__writable.clear()
@@ -103,6 +110,12 @@ cdef class _Socket(_original_Socket):
         self.__readable.wait()
 
     cpdef object send(self, object data, int flags=0, copy=True, track=False):
+        try:
+            return self.__send(data, flags, copy, track)
+        finally:
+            self.__notify_waiters()
+
+    cpdef object __send(self, object data, int flags=0, copy=True, track=False):
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & NOBLOCK:
             return _original_Socket.send(self, data, flags, copy, track)
@@ -117,9 +130,16 @@ cdef class _Socket(_original_Socket):
                 if e.errno != EAGAIN:
                     raise
             # defer to the event loop until we're notified the socket is writable
+            self.__notify_waiters()
             self._wait_write()
 
     cpdef object recv(self, int flags=0, copy=True, track=False):
+        try:
+            return self.__recv(flags, copy, track)
+        finally:
+            self.__notify_waiters()
+
+    cpdef object __recv(self, int flags=0, copy=True, track=False):
         if flags & NOBLOCK:
             return _original_Socket.recv(self, flags, copy, track)
         flags = flags | NOBLOCK
@@ -129,4 +149,14 @@ cdef class _Socket(_original_Socket):
             except ZMQError, e:
                 if e.errno != EAGAIN:
                     raise
+            self.__notify_waiters()
             self._wait_read()
+
+    def getsockopt(self, *args, **kw):
+        try:
+            return self.__getsockopt(*args, **kw)
+        finally:
+            self.__notify_waiters()
+
+    def __getsockopt(self, *args, **kw):
+        return _original_Socket.getsockopt(self, *args, **kw)
