@@ -1,9 +1,9 @@
+from distutils.command.build_ext import build_ext
+from distutils.core import Command
+from setuptools import setup 
+from traceback import print_exc
 import os
 import sys
-
-from distutils.core import Command, setup
-from distutils.command.build_ext import build_ext
-from traceback import print_exc
 
 cython_available = False
 try:
