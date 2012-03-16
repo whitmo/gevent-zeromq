@@ -1,8 +1,6 @@
 from distutils.command.build_ext import build_ext
 from distutils.core import Command
-from distutils.core import Command
 from distutils.core import setup
-from setuptools import setup 
 from traceback import print_exc
 import os
 import sys
@@ -25,13 +23,6 @@ if not disable_cython:
         pass
 
 try:
-## <<<<<<< HEAD
-##     from Cython.Distutils import build_ext
-##     from Cython.Distutils.extension import Extension
-##     cython_available = True
-## except ImportError, e:
-##     pass
-## =======
     prefer_pyzmq_static = '--prefer-pyzmq-static' in sys.argv
     sys.argv.remove('--prefer-pyzmq-static')
 except ValueError:
