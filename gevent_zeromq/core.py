@@ -6,8 +6,12 @@ from zmq import *
 # imported with different names as to not have the star import try to to clobber (when building with cython)
 from zmq.core.context import Context as _original_Context
 from zmq.core.socket import Socket as _original_Socket
+from zmq.core.poll import Poller as _original_Poller
 
-from gevent.event import Event
+import gevent
+import gevent.core
+import gevent.select
+from gevent.event import AsyncResult
 from gevent.hub import get_hub
 
 from gevent_zeromq.helpers import create_weakmethod
@@ -27,8 +31,9 @@ class _Context(_original_Context):
         non-blocking is returned
         """
         if self.closed:
-            raise ZMQError(ENOTSUP)
+            raise zmq.ZMQError(zmq.ENOTSUP)
         return _Socket(self, socket_type)
+
 
 class _Socket(_original_Socket):
     """Green version of :class:`zmq.core.socket.Socket`
@@ -45,7 +50,7 @@ class _Socket(_original_Socket):
     marked as readable and triggers the necessary read and write events (which
     are waited for in the recv and send methods).
 
-    Some doubleunderscore prefixes are used to minimize pollution of
+    Some double underscore prefixes are used to minimize pollution of
     :class:`zmq.core.socket.Socket`'s namespace.
     """
 
@@ -70,42 +75,51 @@ class _Socket(_original_Socket):
 
     def close(self):
         # close the _state_event event, keeps the number of active file descriptors down
-        if not self.closed and getattr(self, '_state_event', None):
-            self.__del__()
-        super(_Socket, self).close()
+        if not self._closed and getattr(self, '_state_event', None):
+            try:
+                self._state_event.stop()
+            except AttributeError, e:
+                # gevent<1.0 compat
+                self._state_event.cancel()
+            self._state_event = None
 
     def __setup_events(self):
-        self.__readable = Event()
-        self.__writable = Event()
+        self.__readable = AsyncResult()
+        self.__writable = AsyncResult()
         callback = create_weakmethod(_Socket.__state_changed, self, _Socket)
+
         try:
-            self._state_event = get_hub().loop.io(self.__getsockopt(FD), 1) # read state watcher
+            self._state_event = get_hub().loop.io(self.__getsockopt(zmq.FD), 1) # read state watcher
             self._state_event.start(callback)
         except AttributeError:
             # for gevent<1.0 compatibility
             from gevent.core import read_event
-            self._state_event = read_event(self.__getsockopt(FD), callback, persist=True)
+            self._state_event = read_event(self.__getsockopt(zmq.FD), callback, persist=True)
 
     def __state_changed(self, event=None, _evtype=None):
-        if self.closed:
-            # if the socket has entered a close state resume any waiting greenlets
-            self.__writable.set()
-            self.__readable.set()
-            return
-
-        events = self.__getsockopt(zmq.EVENTS)
-        if events & zmq.POLLOUT:
-            self.__writable.set()
-        if events & zmq.POLLIN:
-            self.__readable.set()
+        try:
+            if self.closed:
+                # if the socket has entered a close state resume any waiting greenlets
+                self.__writable.set()
+                self.__readable.set()
+                return
+            events = self.__getsockopt(zmq.EVENTS)
+        except zmq.ZMQError, exc:
+            self.__writable.set_exception(exc)
+            self.__readable.set_exception(exc)
+        else:
+            if events & zmq.POLLOUT:
+                self.__writable.set()
+            if events & zmq.POLLIN:
+                self.__readable.set()
 
     def _wait_write(self):
-        self.__writable.clear()
-        self.__writable.wait()
+        self.__writable = AsyncResult()
+        self.__writable.get()
 
     def _wait_read(self):
-        self.__readable.clear()
-        self.__readable.wait()
+        self.__readable = AsyncResult()
+        self.__readable.get()
 
     def __notify_waiters(self):
         """Notifies all waiters about a possible change in the socket state.
@@ -165,3 +179,83 @@ class _Socket(_original_Socket):
 
     def __getsockopt(self, *args, **kw):
         return _original_Socket.getsockopt(self, *args, **kw)
+
+
+
+class _Poller(_original_Poller):
+    """Replacement for :class:`zmq.core.Poller`
+
+    Ensures that the greened Poller below is used in calls to :meth:`zmq.core.Poller.poll`.
+    """
+
+    def _get_descriptors(self):
+        """Returns three elements tuple with socket descriptors ready for gevent.select.select
+        """
+        rlist = []
+        wlist = []
+        xlist = []
+
+        for socket, flags in self.sockets.items():
+            if isinstance(socket, _Socket):
+                fd = socket.getsockopt(zmq.FD)
+            elif isinstance(socket, int):
+                fd = socket
+            elif hasattr(socket, 'fileno'):
+                try:
+                    fd = int(socket.fileno())
+                except:
+                    raise ValueError('fileno() must return an valid integer fd')
+            else:
+                raise TypeError("Socket must be a 0MQ socket, an integer fd or have a fileno() method: %r" % socket)
+            
+            if flags & zmq.POLLIN: rlist.append(fd)
+            if flags & zmq.POLLOUT: wlist.append(fd)
+            if flags & zmq.POLLERR: xlist.append(fd)
+
+        return (rlist, wlist, xlist)
+
+    def poll(self, timeout=-1):
+        """Overridden method to ensure that the green version of Poller is used
+
+        Behaves the same as :meth:`zmq.core.Poller.poll`
+        """
+
+        if timeout is None:
+            timeout = -1
+        
+        timeout = int(timeout)
+        if timeout < 0:
+            timeout = -1
+
+        rlist = None
+        wlist = None
+        xlist = None
+
+        if timeout > 0:
+            tout = gevent.Timeout.start_new(timeout/1000.0)
+
+        try:
+            # Loop until timeout or events available
+            while True:
+                events = super(_Poller, self).poll(0)
+                if events or timeout == 0:
+                    return events
+
+                # wait for activity on sockets in a green way
+                if not rlist and not wlist and not xlist:
+                    rlist, wlist, xlist = self._get_descriptors()
+
+                try:
+                    gevent.select.select(rlist, wlist, xlist)
+                except gevent.select.error, ex:
+                    raise zmq.ZMQError(*ex.args)
+
+        except gevent.Timeout, t:
+            if t is not tout:
+                raise
+            return []
+        finally:
+           if timeout > 0:
+               tout.cancel()
+
+

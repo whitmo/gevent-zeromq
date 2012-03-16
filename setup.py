@@ -1,18 +1,47 @@
+from distutils.command.build_ext import build_ext
+from distutils.core import Command
+from distutils.core import Command
+from distutils.core import setup
+from setuptools import setup 
+from traceback import print_exc
 import os
 import sys
 
-from distutils.core import Command, setup
-from distutils.command.build_ext import build_ext
-from traceback import print_exc
-
 cython_available = False
+
 try:
-    from Cython.Distutils import build_ext
-    from Cython.Distutils.extension import Extension
-    cython_available = True
-except ImportError, e:
-    print 'WARNING: cython not available, proceeding with pure python implementation. (%s)' % e
-    pass
+    disable_cython = '--disable-cython' in sys.argv
+    sys.argv.remove('--disable-cython')
+except ValueError:
+    disable_cython = False
+
+if not disable_cython:
+    try:
+        from Cython.Distutils import build_ext
+        from Cython.Distutils.extension import Extension
+        cython_available = True
+    except ImportError, e:
+        print 'WARNING: cython not available, proceeding with pure python implementation. (%s)' % e
+        pass
+
+try:
+## <<<<<<< HEAD
+##     from Cython.Distutils import build_ext
+##     from Cython.Distutils.extension import Extension
+##     cython_available = True
+## except ImportError, e:
+##     pass
+## =======
+    prefer_pyzmq_static = '--prefer-pyzmq-static' in sys.argv
+    sys.argv.remove('--prefer-pyzmq-static')
+except ValueError:
+    prefer_pyzmq_static = False
+
+if prefer_pyzmq_static:
+    pyzmq_dependency = 'pyzmq-static'
+else:
+    pyzmq_dependency = 'pyzmq'
+
 
 try:
     import nose
@@ -21,17 +50,17 @@ except ImportError:
 
 def get_ext_modules():
     if not cython_available:
+        print 'WARNING: cython not available, proceeding with pure python implementation.'
         return []
-
     try:
         import gevent
     except ImportError, e:
-        print 'WARNING: gevent must be installed to build cython version of gevent-zeromq (%s).', e
+        print 'WARNING: gevent must be installed to build cython version of gevent-zeromq (%s).' % e
         return []
     try:
         import zmq
     except ImportError, e:
-        print 'WARNING: pyzmq(>=2.1.0) must be installed to build cython version of gevent-zeromq (%s).', e
+        print 'WARNING: pyzmq or pyzmq-static (>=2.1.0) must be installed to build cython version of gevent-zeromq (%s).', e
         return []
 
     return [Extension('gevent_zeromq.core', ['gevent_zeromq/core.pyx'], include_dirs=zmq.get_includes())]
@@ -67,7 +96,7 @@ class TestCommand(Command):
         else:
             return nose.core.TestProgram(argv=["", '-vvs', os.path.join(self._zmq_dir, 'tests')])
 
-__version__ = (0, 2, 0)
+__version__ = (0, 2, 2)
 
 setup(
     name = 'gevent_zeromq',
@@ -80,6 +109,6 @@ setup(
     url = 'http://github.com/traviscline/gevent-zeromq',
     description = 'gevent compatibility layer for pyzmq',
     long_description=open('README.rst').read(),
-    install_requires = ['pyzmq>=2.1.0', 'gevent'],
+    install_requires = [pyzmq_dependency + '>=2.1.0', 'gevent'],
     license = 'New BSD',
 )

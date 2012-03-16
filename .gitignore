@@ -5,3 +5,9 @@
 /build/
 /dist/
 MANIFEST
+*egg.info
+/gevent_zeromq.egg-info/PKG-INFO
+/gevent_zeromq.egg-info/SOURCES.txt
+/gevent_zeromq.egg-info/dependency_links.txt
+/gevent_zeromq.egg-info/requires.txt
+/gevent_zeromq.egg-info/top_level.txt
